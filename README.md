@@ -36,26 +36,36 @@ purely at the glyph-metrics level.
 
 ## Fix
 
-Inject CJK fonts into the family stack so the browser picks a known
-monospace-ish CJK font with predictable metrics instead of an arbitrary
-fallback:
+Inject CJK fonts into every Menlo-prefixed family stack in the bundle so
+the browser picks a known CJK font with predictable metrics instead of an
+arbitrary fallback:
 
 ```diff
 - fontFamily: 'Menlo, Monaco, "Courier New", monospace'
 + fontFamily: 'Menlo, Monaco, "Hiragino Sans", "Yu Gothic", "Courier New", monospace'
 ```
 
+This applies to **two** places in the bundle:
+
+| File | Why |
+|------|-----|
+| `out/renderer/assets/TerminalTab-*.js` | xterm.js terminal panes |
+| `node_modules/monaco-editor/esm/vs/editor/common/config/fontInfo.js` | Monaco editor's `DEFAULT_MAC_FONT_FAMILY` — used by the chat panel's code blocks, file diff viewer, etc. |
+
 The patch is non-trivial because the JS bundle lives inside `app.asar`
 which is integrity-checked:
 
 1. Extract `app.asar`.
-2. Patch the `fontFamily` string in the auto-discovered `TerminalTab-*.js`.
-3. Repack `app.asar`, preserving the original "unpacked" pattern
+2. Find every `'Menlo...'` single-quoted string (escape-aware regex,
+   handles `'Menlo, Monaco, \'Courier New\', monospace'` correctly).
+3. Inject `"Hiragino Sans", "Yu Gothic"` after the leading `Menlo,` of
+   each stack. Idempotent — already-CJK stacks are skipped.
+4. Repack `app.asar`, preserving the original "unpacked" pattern
    (node-pty, sharp, @parcel/watcher, claude-agent-sdk — these contain
    native binaries that must stay outside the asar).
-4. Recompute the SHA256 and write it into `Info.plist`'s
+5. Recompute the SHA256 and write it into `Info.plist`'s
    `ElectronAsarIntegrity` dict.
-5. Strip the (now-invalid) Developer ID signature and ad-hoc re-sign.
+6. Strip the (now-invalid) Developer ID signature and ad-hoc re-sign.
 
 ## Usage
 
@@ -64,13 +74,19 @@ git clone https://github.com/szo444/collaborator-cjk-fix
 cd collaborator-cjk-fix
 
 ./fix.sh             # apply the patch
-./fix.sh --check     # show all fontFamily strings inside the asar
+./fix.sh --check     # show every Menlo-prefixed stack and its patch state
+./fix.sh --restart   # apply, then quit + relaunch Collaborator atomically
 ./fix.sh --rollback  # restore from .bak files
 ```
 
-Quit and reopen Collaborator after applying. The patch script keeps
-`app.asar.bak`, `Info.plist.bak`, and `app.asar.unpacked.bak` next to
-the originals so rollback is a single command.
+After `./fix.sh` (without `--restart`) you **must** quit and reopen
+Collaborator — the running renderer has the OLD font in memory and won't
+re-read the asar until launch. `--check` prints a clear warning when it
+detects Collaborator is still running.
+
+The patch script keeps `app.asar.bak`, `Info.plist.bak`, and
+`app.asar.unpacked.bak` next to the originals so rollback is a single
+command.
 
 ### Requirements
 
@@ -90,10 +106,14 @@ COLLAB_APP=/path/to/Collaborator.app ./fix.sh
 
 - **Updates wipe the patch.** Each new Collaborator release ships a new
   `app.asar`, so you have to re-run `./fix.sh` after every update.
-  The script auto-discovers the (hashed) JS filename, so it should
-  survive minor version bumps. If Collaborator changes its baseline
-  font stack, the script will exit with a clear error — run
-  `./fix.sh --check` to inspect.
+  The script auto-discovers Menlo-prefixed stacks anywhere in the bundle
+  (escape-aware), so it survives minor version bumps and any tweaks
+  Collaborator makes to the exact font string. If Collaborator
+  switches to a non-Menlo monospace baseline, `./fix.sh --check` will
+  report 0 stacks found — at that point inspect the asar manually.
+- **Patch is invisible until restart.** The running Collaborator
+  renderer keeps the OLD font stack in memory. Quit + reopen, or use
+  `--restart`.
 - **Signature.** The original Developer ID signature is destroyed by
   the modification. The script ad-hoc re-signs so the app still
   launches. Notarization is gone, but Gatekeeper won't re-check an
